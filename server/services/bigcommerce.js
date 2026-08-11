@@ -48,9 +48,48 @@ class BigCommerceClient {
     return res.data.data;
   }
 
+  /**
+   * Fetch every product in the catalog, paginating automatically.
+   * Used by the product-index sync (re-index). Includes variants + images so
+   * the index can compute variant-level stock and store a thumbnail.
+   *
+   * @param {(info:{page:number, totalPages:number, count:number}) => void} [onPage]
+   *        optional callback invoked after each page (for progress logging).
+   * @returns {Promise<Array>} all product objects
+   */
+  async getAllProducts(onPage) {
+    const all = [];
+    let page = 1;
+    while (true) {
+      const res = await this.v3.get('/catalog/products', {
+        params: {
+          include: 'variants,images,primary_image',
+          limit: 250,
+          page,
+        },
+      });
+      const batch = res.data.data || [];
+      all.push(...batch);
+
+      const pagination = res.data.meta?.pagination;
+      if (onPage) {
+        onPage({
+          page,
+          totalPages: pagination?.total_pages ?? page,
+          count: all.length,
+        });
+      }
+      if (!pagination || page >= pagination.total_pages) break;
+      page++;
+    }
+    return all;
+  }
+
   async getProduct(productId) {
     const res = await this.v3.get(`/catalog/products/${productId}`, {
-      params: { include: 'variants' },
+      // images/primary_image are needed so component thumbnails resolve (used
+      // for the bundle config + the collage thumbnail in the bundle list).
+      params: { include: 'variants,images,primary_image' },
     });
     return res.data.data;
   }
@@ -60,6 +99,21 @@ class BigCommerceClient {
     return res.data.data;
   }
 
+  /**
+   * Return the store's currency settings so the UI can format prices in the
+   * merchant's real currency (e.g. INR ₹) instead of a hard-coded symbol.
+   * GET /v2/store includes currency code, symbol, and decimal places.
+   */
+  async getStoreInfo() {
+    const res = await this.v2.get('/store');
+    const s = res.data || {};
+    return {
+      currency: s.currency || 'USD',                 // ISO code, e.g. "INR"
+      currency_symbol: s.currency_symbol || '$',     // e.g. "₹"
+      decimal_places: s.decimal_places ?? 2,
+    };
+  }
+
   async updateProduct(productId, data) {
     const res = await this.v3.put(`/catalog/products/${productId}`, data);
     return res.data.data;
@@ -67,6 +121,75 @@ class BigCommerceClient {
 
   async deleteProduct(productId) {
     await this.v3.delete(`/catalog/products/${productId}`);
+  }
+
+  // ─── Carts (server-to-server V3) ──────────────────────────────────────────────
+  // Used to add a bundle to the cart as the priced bundle product PLUS one ₹0
+  // "custom item" per component, so the components show as their own cart lines.
+  // Custom items are display-only (no catalog link) — they don't deduct inventory
+  // (the order webhook already deducts components off the bundle line) and, at
+  // list_price 0, don't change the total.
+
+  /**
+   * Create a new cart. Returns the created cart object, including
+   * redirect_urls.cart_url (a storefront URL that adopts this cart).
+   * @param {{lineItems?:Array, customItems?:Array, channelId?:number}} opts
+   */
+  async createCart({ lineItems = [], customItems = [], channelId } = {}) {
+    const body = { line_items: lineItems, custom_items: customItems };
+    if (channelId) body.channel_id = channelId;
+    const res = await this.v3.post('/carts', body, {
+      params: { include: 'redirect_urls' },
+    });
+    return res.data.data;
+  }
+
+  /**
+   * Add items to an existing cart. Returns the updated cart object.
+   */
+  async addCartItems(cartId, { lineItems = [], customItems = [] } = {}) {
+    const res = await this.v3.post(`/carts/${cartId}/items`, {
+      line_items: lineItems,
+      custom_items: customItems,
+    });
+    return res.data.data;
+  }
+
+  /**
+   * Create storefront redirect URLs for a cart. Returns { cart_url, checkout_url, ... }.
+   */
+  async getCartRedirectUrls(cartId) {
+    const res = await this.v3.post(`/carts/${cartId}/redirect_urls`, {});
+    return res.data.data;
+  }
+
+  // ─── Channel assignments ────────────────────────────────────────────────────
+  // Products created via the v3 API are NOT auto-assigned to any storefront
+  // channel (unlike products created in the admin UI). Without an assignment a
+  // product is invisible on every storefront, so bundles must be assigned
+  // explicitly after creation.
+
+  /**
+   * Return the channel assignments for one or more product IDs.
+   * @param {number|number[]} productIds
+   * @returns {Array<{channel_id:number, product_id:number}>}
+   */
+  async getProductChannelAssignments(productIds) {
+    const ids = (Array.isArray(productIds) ? productIds : [productIds]).join(',');
+    const res = await this.v3.get('/catalog/products/channel-assignments', {
+      params: { 'product_id:in': ids, limit: 250 },
+    });
+    return res.data.data;
+  }
+
+  /**
+   * Assign a product to the given storefront channels (idempotent — PUT upserts).
+   * No-op when channelIds is empty.
+   */
+  async assignProductToChannels(productId, channelIds) {
+    if (!channelIds || !channelIds.length) return;
+    const body = channelIds.map((channel_id) => ({ product_id: productId, channel_id }));
+    await this.v3.put('/catalog/products/channel-assignments', body);
   }
 
   // ─── Metafields ───────────────────────────────────────────────────────────────
@@ -186,9 +309,9 @@ class BigCommerceClient {
     if (product.inventory_tracking === 'none') {
       return Infinity; // treat as unlimited
     }
-    if (product.inventory_tracking === 'product') {
-      return product.inventory_level ?? 0;
-    }
+    // if (product.inventory_tracking === 'product') {
+    //   return product.inventory_level ?? 0;
+    // }
     if (product.inventory_tracking === 'variant') {
       return (product.variants || []).reduce(
         (sum, v) => sum + (v.inventory_level ?? 0),
@@ -196,6 +319,100 @@ class BigCommerceClient {
       );
     }
     return product.inventory_level ?? 0;
+  }
+
+  /**
+   * Reserve or return a component's real inventory in BigCommerce.
+   *
+   * @param {number} productId
+   * @param {number} delta  negative to RESERVE (deduct), positive to RETURN (add back)
+   * @returns {{adjusted:boolean, level?:number, reason?:string}}
+   *
+   * Tracking behaviour:
+   *  - 'none'    → untracked, nothing to reserve; skipped.
+   *  - 'variant' → variant-level reservation is not handled in this version;
+   *                skipped with a warning so variant stock is never corrupted.
+   *  - 'product' → inventory_level is adjusted, clamped to a floor of 0.
+   */
+  async adjustProductInventory(productId, delta) {
+    if (!delta) return { adjusted: false, reason: 'no-op (delta 0)' };
+
+    const product = await this.getProduct(productId);
+
+    if (product.inventory_tracking === 'none') {
+      return { adjusted: false, reason: 'untracked — nothing to reserve' };
+    }
+    if (product.inventory_tracking === 'variant') {
+      console.warn(
+        `[Inventory] Product ${productId} is variant-tracked — skipping ` +
+        `reservation (not supported in this version).`
+      );
+      return { adjusted: false, reason: 'variant tracking not supported' };
+    }
+
+    const current = product.inventory_level ?? 0;
+    const next = Math.max(0, current + delta); // never below 0
+    await this.updateProduct(productId, { inventory_level: next });
+    return { adjusted: true, level: next };
+  }
+
+  // ─── Orders ───────────────────────────────────────────────────────────────────
+  // Used to annotate an order with its bundle contents (written into staff_notes
+  // so it shows on the admin order page). Orders live in the V2 API.
+
+  /** Fetch a single order (V2). Returns null on 404. */
+  async getOrder(orderId) {
+    try {
+      const res = await this.v2.get(`/orders/${orderId}`);
+      return res.data;
+    } catch (err) {
+      if (err.response?.status === 404) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Fetch the line items (products) of an order (V2). Each item includes
+   * `id`, `product_id`, `name`, `sku`, `quantity`.
+   */
+  async getOrderProducts(orderId) {
+    const res = await this.v2.get(`/orders/${orderId}/products`);
+    return res.data || [];
+  }
+
+  /** Update an order (V2) — used to write the bundle breakdown into staff_notes. */
+  async updateOrder(orderId, data) {
+    const res = await this.v2.put(`/orders/${orderId}`, data);
+    return res.data;
+  }
+
+  /** Read a single order metafield (V3), or null. Used as the inventory-
+   *  adjustment idempotency record so retries can't double-apply. */
+  async getOrderMetafield(orderId, namespace, key) {
+    const res = await this.v3.get(`/orders/${orderId}/metafields`, {
+      params: { namespace, key },
+    });
+    return res.data.data?.[0] || null;
+  }
+
+  /** Upsert an order metafield (V3). app_only — internal, not storefront-readable. */
+  async upsertOrderMetafield(orderId, namespace, key, value) {
+    const existing = await this.getOrderMetafield(orderId, namespace, key);
+    const payload = {
+      namespace,
+      key,
+      value: typeof value === 'string' ? value : JSON.stringify(value),
+      permission_set: 'app_only',
+    };
+    if (existing) {
+      const res = await this.v3.put(
+        `/orders/${orderId}/metafields/${existing.id}`,
+        payload
+      );
+      return res.data.data;
+    }
+    const res = await this.v3.post(`/orders/${orderId}/metafields`, payload);
+    return res.data.data;
   }
 
   // ─── Webhooks ─────────────────────────────────────────────────────────────────
@@ -290,6 +507,7 @@ class BigCommerceClient {
   }
 
   /**
+   * Returns the bundle IDs a product is bound to.
    * Add a bundle product ID to a component product's membership list.
    */
   async addBundleMembership(componentProductId, bundleProductId) {

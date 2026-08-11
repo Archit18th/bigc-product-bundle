@@ -18,7 +18,14 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { getTokenForStore } = require('./auth');
-const { syncBundleFromInventory } = require('../services/bundleService');
+const {
+  syncBundleFromInventory,
+  annotateOrderWithBundleContents,
+  deductOrderBundleInventory,
+  addBundleComponentsToOrder,
+  handleOrderStatusForInventory,
+} = require('../services/bundleService');
+const productIndex = require('../services/productIndex');
 
 const WEBHOOK_SECRET_HEADER = 'x-bundle-secret'; // Express lower-cases header keys
 
@@ -112,10 +119,18 @@ router.post('/inventory', async (req, res) => {
     return;
   }
 
-  const accessToken = getTokenForStore(storeHash);
+  const accessToken = await getTokenForStore(storeHash);
   if (!accessToken) {
     console.warn(`[Webhook] No token for store ${storeHash}. Skipping.`);
     return;
+  }
+
+  // Keep the local product index fresh so DB-first reads reflect this change
+  // between full re-indexes. Non-fatal if it fails (e.g. product was deleted).
+  try {
+    await productIndex.refreshOne(storeHash, accessToken, productId);
+  } catch (err) {
+    console.warn(`[Webhook] index refresh for product ${productId} failed:`, err.message);
   }
 
   try {
@@ -124,12 +139,139 @@ router.post('/inventory', async (req, res) => {
       console.log(
         `[Webhook] Synced ${results.length} bundle(s) for product ${productId}:`,
         results.map((r) =>
-          `bundle ${r.bundleId} → ${r.available ? 'available' : 'disabled'} (qty ${r.minStock})`
+          `bundle ${r.bundleId} → ${r.available ? 'available' : 'disabled'}`
         ).join(', ')
       );
     }
   } catch (err) {
     console.error('[Webhook] syncBundleFromInventory error:', err.message);
+  }
+});
+
+// ─── POST /webhooks/order ─────────────────────────────────────────────────────
+// Fires on store/order/created. For each bundle in the order we (1) write the
+// component breakdown into staff_notes (admin order page) and (2) deduct each
+// component's inventory and re-sync the bundle's buildable count.
+
+router.post('/order', async (req, res) => {
+  // Acknowledge quickly (BC expects 200 within 10s)
+  res.status(200).json({ received: true });
+
+  // Authenticate via the shared secret header BC echoes back.
+  if (!verifyWebhookSecret(req.headers[WEBHOOK_SECRET_HEADER])) {
+    console.warn('[Webhook] Invalid or missing secret header, ignoring.');
+    return;
+  }
+
+  if (!req.rawBody) {
+    console.warn('[Webhook] No raw body captured — unexpected content-type?');
+    return;
+  }
+
+  // Payload: { producer: "stores/abc123", scope: "store/order/created",
+  //            data: { type: "order", id: 308 } }
+  const { producer, data } = req.body;
+  if (!producer || !data) {
+    console.warn('[Webhook] Missing producer or data', req.body);
+    return;
+  }
+
+  const storeHash = (producer || '').replace(/^stores\//, '');
+  const orderId = data.id;
+
+  if (!storeHash || !orderId) {
+    console.warn('[Webhook] Could not parse storeHash or orderId', { producer, data });
+    return;
+  }
+
+  const accessToken = await getTokenForStore(storeHash);
+  if (!accessToken) {
+    console.warn(`[Webhook] No token for store ${storeHash}. Skipping.`);
+    return;
+  }
+
+  // 1. Annotate staff_notes (admin display).
+  try {
+    const result = await annotateOrderWithBundleContents(storeHash, accessToken, orderId);
+    if (result.updated) {
+      console.log(`[Webhook] Annotated order ${orderId} with ${result.bundles} bundle(s).`);
+    }
+  } catch (err) {
+    console.error('[Webhook] annotateOrderWithBundleContents error:', err.message);
+  }
+
+  // 2. Deduct component inventory + re-sync bundle counts.
+  try {
+    const inv = await deductOrderBundleInventory(storeHash, accessToken, orderId);
+    if (!inv.skipped) {
+      console.log(
+        `[Webhook] Order ${orderId}: deducted inventory for ${inv.adjusted} ` +
+        `component(s) across ${inv.bundles} bundle(s).`
+      );
+    }
+  } catch (err) {
+    console.error('[Webhook] deductOrderBundleInventory error:', err.message);
+  }
+
+  // 3. Expand bundles into $0 component line items — ONLY for bundles the
+  //    merchant flagged via the bundle list "Modify" action. Bundles without
+  //    the flag are skipped inside addBundleComponentsToOrder (no order-modify
+  //    API call happens for them). Idempotent via an order metafield.
+  try {
+    const comp = await addBundleComponentsToOrder(storeHash, accessToken, orderId);
+    if (!comp.skipped) {
+      console.log(
+        `[Webhook] Order ${orderId}: added ${comp.added} component line item(s) ` +
+        `at $0 across ${comp.bundles} flagged bundle(s).`
+      );
+    }
+  } catch (err) {
+    console.error('[Webhook] addBundleComponentsToOrder error:', err.message);
+  }
+});
+
+// ─── POST /webhooks/order-status ──────────────────────────────────────────────
+// Fires on store/order/statusUpdated. If the order moved into a reversed status
+// (refunded/cancelled/declined), restore the component inventory we deducted.
+
+router.post('/order-status', async (req, res) => {
+  res.status(200).json({ received: true });
+
+  if (!verifyWebhookSecret(req.headers[WEBHOOK_SECRET_HEADER])) {
+    console.warn('[Webhook] Invalid or missing secret header, ignoring.');
+    return;
+  }
+  if (!req.rawBody) {
+    console.warn('[Webhook] No raw body captured — unexpected content-type?');
+    return;
+  }
+
+  const { producer, data } = req.body;
+  if (!producer || !data) {
+    console.warn('[Webhook] Missing producer or data', req.body);
+    return;
+  }
+
+  const storeHash = (producer || '').replace(/^stores\//, '');
+  const orderId = data.id;
+  if (!storeHash || !orderId) {
+    console.warn('[Webhook] Could not parse storeHash or orderId', { producer, data });
+    return;
+  }
+
+  const accessToken = await getTokenForStore(storeHash);
+  if (!accessToken) {
+    console.warn(`[Webhook] No token for store ${storeHash}. Skipping.`);
+    return;
+  }
+
+  try {
+    const result = await handleOrderStatusForInventory(storeHash, accessToken, orderId);
+    if (!result.skipped) {
+      console.log(`[Webhook] Order ${orderId}: restored inventory for ${result.restored} component(s).`);
+    }
+  } catch (err) {
+    console.error('[Webhook] handleOrderStatusForInventory error:', err.message);
   }
 });
 

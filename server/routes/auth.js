@@ -11,47 +11,61 @@ const axios = require('axios');
 const crypto = require('crypto');
 const router = express.Router();
 const tokenStore = require('../services/tokenStore');
+const userStore = require('../services/userStore');
+const scriptManager = require('../services/scriptManager');
+
+/** base64url-decode to a Buffer (handles missing padding). */
+function b64urlDecode(str) {
+  const padded = str.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(padded, 'base64');
+}
 
 /**
- * Verify a BigCommerce signed_payload.
+ * Verify a BigCommerce `signed_payload_jwt` and return its claims.
  *
- * Format: base64url(json).hmac_sha256_hex(base64url(json), clientSecret)
- * BC sends the HMAC as a lower-case hex string. We compute our own hex HMAC
- * and compare with timingSafeEqual to prevent timing attacks.
+ * BigCommerce signs load/uninstall callbacks as an HS256 JWT using the app's
+ * client secret. (The older `signed_payload` HMAC param is deprecated and not
+ * verified here.) We verify the signature in constant time, then check the
+ * standard temporal claims and that the audience equals our client ID.
+ *
+ * Returns the decoded payload on success, or null on any failure.
  */
-function verifySignedPayload(signedPayload, clientSecret) {
-  const parts = (signedPayload || '').split('.');
-  if (parts.length !== 2) return null;
+function verifySignedPayloadJWT(token, clientSecret, clientId) {
+  const parts = (token || '').split('.');
+  if (parts.length !== 3) return null;
 
-  const [encodedData, encodedSignature] = parts;
-  if (!encodedData || !encodedSignature) return null;
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  if (!encodedHeader || !encodedPayload || !encodedSignature) return null;
 
+  // Recompute the HS256 signature over `header.payload` (base64url, no padding).
   const expectedSig = crypto
     .createHmac('sha256', clientSecret)
-    .update(encodedData)
-    .digest('hex');
+    .update(`${encodedHeader}.${encodedPayload}`)
+    .digest();
 
-  // Decode both as hex buffers for constant-time comparison
-  const sigBuffer      = Buffer.from(encodedSignature, 'hex');
-  const expectedBuffer = Buffer.from(expectedSig, 'hex');
+  const sigBuffer = b64urlDecode(encodedSignature);
 
-  // Length mismatch means invalid hex or wrong secret — reject without crashing
-  if (sigBuffer.length === 0 || sigBuffer.length !== expectedBuffer.length) {
-    return null;
-  }
+  // Constant-time compare; bail on length mismatch (wrong secret / tampering).
+  if (sigBuffer.length !== expectedSig.length) return null;
+  if (!crypto.timingSafeEqual(sigBuffer, expectedSig)) return null;
 
-  if (!crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
-    return null;
-  }
-
+  let payload;
   try {
-    // base64url uses - and _ instead of + and /; add padding if missing
-    const padded = encodedData.replace(/-/g, '+').replace(/_/g, '/');
-    const json = Buffer.from(padded, 'base64').toString('utf8');
-    return JSON.parse(json);
+    payload = JSON.parse(b64urlDecode(encodedPayload).toString('utf8'));
   } catch {
     return null;
   }
+
+  // Temporal validity (seconds since epoch). Allow 60s of clock skew.
+  const now  = Math.floor(Date.now() / 1000);
+  const skew = 60;
+  if (typeof payload.exp === 'number' && now > payload.exp + skew) return null;
+  if (typeof payload.nbf === 'number' && now + skew < payload.nbf) return null;
+
+  // Audience must be this app's client ID.
+  if (clientId && payload.aud !== clientId) return null;
+
+  return payload;
 }
 
 // ─── GET /auth — OAuth install callback ──────────────────────────────────────
@@ -76,15 +90,42 @@ router.get('/auth', async (req, res) => {
       }
     );
 
-    const { access_token, user, context: ctx } = tokenRes.data;
+    const { access_token, user, owner, context: ctx } = tokenRes.data;
     const storeHash = ctx.replace('stores/', '');
 
+    // We only track the STORE OWNER in the users table, not every app user.
+    // BigCommerce sends `owner` (store owner) separately from `user` (whoever
+    // is acting). Fall back to `user` if owner is missing.
+    const ownerInfo = owner || user;
+
     // Persist token (systemCategoryId populated lazily on first bundle creation)
-    tokenStore.setStore(storeHash, {
+    await tokenStore.setStore(storeHash, {
       accessToken: access_token,
-      user,
+      user: ownerInfo,
       systemCategoryId: null,
     });
+
+    // Record ONLY the store owner (id, email, token) in the users table,
+    // and mark them logged in (user_status = true).
+    await userStore.upsertUser(storeHash, ownerInfo, access_token);
+    await userStore.setUserStatus(storeHash, ownerInfo?.id ?? null, true);
+
+    // Auto-install the storefront scripts so the merchant never has to paste
+    // them into Script Manager by hand. Best-effort: a failure here (e.g. the
+    // token lacks the Content scope) must NOT block a successful install.
+    try {
+      const results = await scriptManager.installStorefrontScripts(
+        storeHash,
+        access_token,
+        process.env.APP_URL
+      );
+      console.log('[Auth] storefront scripts installed:', results);
+    } catch (scriptErr) {
+      console.error(
+        '[Auth] storefront script install failed (install still OK):',
+        scriptErr.response?.data || scriptErr.message
+      );
+    }
 
     // Start session — save explicitly before redirecting (BUG-24)
     req.session.storeHash   = storeHash;
@@ -103,15 +144,20 @@ router.get('/auth', async (req, res) => {
 
 // ─── GET /load — Load callback ────────────────────────────────────────────────
 
-router.get('/load', (req, res) => {
-  const { signed_payload } = req.query;
-  if (!signed_payload) return res.status(400).send('Missing signed_payload.');
+router.get('/load', async (req, res) => {
+  const { signed_payload_jwt } = req.query;
+  if (!signed_payload_jwt) return res.status(400).send('Missing signed_payload_jwt.');
 
-  const payload = verifySignedPayload(signed_payload, process.env.BC_CLIENT_SECRET);
+  const payload = verifySignedPayloadJWT(
+    signed_payload_jwt,
+    process.env.BC_CLIENT_SECRET,
+    process.env.BC_CLIENT_ID
+  );
   if (!payload) return res.status(401).send('Invalid signed payload.');
 
-  const storeHash = payload.store_hash;
-  const stored    = tokenStore.getStore(storeHash);
+  // In the JWT, the store context lives in `sub` as "stores/<hash>".
+  const storeHash = (payload.sub || '').replace('stores/', '');
+  const stored    = await tokenStore.getStore(storeHash);
 
   if (!stored) {
     // Token not in memory (server restart). Merchant clicks → reinstall prompt.
@@ -124,6 +170,13 @@ router.get('/load', (req, res) => {
   req.session.user        = payload.user;
   req.session.accessToken = stored.accessToken;
 
+  // Record/refresh ONLY the store owner in the users table, and mark them
+  // logged in (user_status = true). `owner` is the store owner; `user` is
+  // whoever opened the app — we intentionally ignore non-owner users here.
+  const ownerInfo = payload.owner || payload.user;
+  await userStore.upsertUser(storeHash, ownerInfo, stored.accessToken);
+  await userStore.setUserStatus(storeHash, ownerInfo?.id ?? null, true);
+
   // Save session before redirect to avoid a race where the first API call
   // arrives before the session write completes (BUG-24)
   req.session.save((err) => {
@@ -134,15 +187,35 @@ router.get('/load', (req, res) => {
 
 // ─── GET /uninstall — Uninstall callback ──────────────────────────────────────
 
-router.get('/uninstall', (req, res) => {
-  const { signed_payload } = req.query;
-  if (!signed_payload) return res.status(400).send('Missing signed_payload.');
+router.get('/uninstall', async (req, res) => {
+  const { signed_payload_jwt } = req.query;
+  if (!signed_payload_jwt) return res.status(400).send('Missing signed_payload_jwt.');
 
-  const payload = verifySignedPayload(signed_payload, process.env.BC_CLIENT_SECRET);
+  const payload = verifySignedPayloadJWT(
+    signed_payload_jwt,
+    process.env.BC_CLIENT_SECRET,
+    process.env.BC_CLIENT_ID
+  );
   if (!payload) return res.status(401).send('Invalid signed payload.');
 
-  tokenStore.deleteStore(payload.store_hash);
+  const storeHash = (payload.sub || '').replace('stores/', '');
+  await tokenStore.deleteStore(storeHash);
+  await userStore.deleteUsersForStore(storeHash);
   return res.status(200).json({ message: 'Uninstalled successfully.' });
+});
+
+// ─── POST /logout — end the session ───────────────────────────────────────────
+// Embedded BC apps have no built-in logout event, so this is an explicit one:
+// mark the user logged out (user_status = false) and destroy the session.
+router.post('/logout', async (req, res) => {
+  const storeHash = req.session?.storeHash;
+  const bcUserId = req.session?.user?.id ?? null;
+  try {
+    if (storeHash) await userStore.setUserStatus(storeHash, bcUserId, false);
+  } catch (err) {
+    console.error('[Logout] setUserStatus error:', err.message);
+  }
+  req.session.destroy(() => res.status(200).json({ message: 'Logged out.' }));
 });
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -163,7 +236,7 @@ function requireSession(req, res, next) {
 /**
  * Get access token for a store hash (used in webhook handler — no session there).
  */
-function getTokenForStore(storeHash) {
+async function getTokenForStore(storeHash) {
   return tokenStore.getAccessToken(storeHash);
 }
 

@@ -10,6 +10,7 @@
  *
  * Products
  *   GET    /api/products/search      — search products (for picker)
+ *   GET    /api/products/recommended — recently-synced products (picker dropdown)
  *   GET    /api/products/:id         — get single product
  *
  * Categories
@@ -25,6 +26,8 @@ const router = express.Router();
 const { requireSession } = require('./auth');
 const { BigCommerceClient } = require('../services/bigcommerce');
 const bundleService = require('../services/bundleService');
+const productIndex = require('../services/productIndex');
+const userStore = require('../services/userStore');
 
 // Apply session guard to all /api/* routes
 router.use(requireSession);
@@ -51,18 +54,26 @@ router.get('/bundles', async (req, res) => {
 
 router.post('/bundles', async (req, res) => {
   try {
-    const { name, description, price, category_ids, products } = req.body;
+    const { name, description, discount_percent, category_ids, products } = req.body;
 
-    if (!name || !price || !products || products.length < 2) {
+    if (!name || !products || products.length < 2) {
       return res.status(400).json({
-        error: 'name, price, and at least 2 products are required.',
+        error: 'name and at least 2 products are required.',
       });
     }
 
+    // Price is derived from component prices + an optional % discount, so the
+    // client no longer sends a price — only an optional discount_percent (0–100).
     const result = await bundleService.createBundle(
       req.storeHash,
       req.accessToken,
-      { name, description, price: Number(price), category_ids: category_ids || [], products }
+      {
+        name,
+        description,
+        discount_percent: Number(discount_percent) || 0,
+        category_ids: category_ids || [],
+        products,
+      }
     );
 
     // Register inventory webhook (idempotent)
@@ -114,6 +125,38 @@ router.put('/bundles/:id', async (req, res) => {
   }
 });
 
+// Inline SKU edit from the bundle list — updates only the SKU, so it skips the
+// full products-array validation that PUT /bundles/:id requires.
+router.put('/bundles/:id/sku', async (req, res) => {
+  try {
+    const { sku } = req.body;
+    if (!sku || !String(sku).trim()) {
+      return res.status(400).json({ error: 'sku is required.' });
+    }
+    const result = await bundleService.updateBundleSku(
+      req.storeHash,
+      req.accessToken,
+      Number(req.params.id),
+      sku
+    );
+    res.json(result);
+  } catch (err) {
+    // Surface BC's own message (e.g. duplicate SKU) when present.
+    const bcErr = err.response?.data;
+    const msg =
+      bcErr?.title ||
+      (bcErr?.errors && Object.values(bcErr.errors)[0]) ||
+      err.message;
+    const status = msg.includes('not a bundle')
+      ? 404
+      : err.response?.status === 409 || /sku/i.test(msg)
+      ? 409
+      : 500;
+    console.error('updateBundleSku error:', bcErr || err.message);
+    res.status(status).json({ error: msg });
+  }
+});
+
 router.delete('/bundles/:id', async (req, res) => {
   try {
     await bundleService.deleteBundle(
@@ -160,11 +203,102 @@ router.get('/products/search', async (req, res) => {
   }
 });
 
+// ─── Product index (local cache / re-index) ─────────────────────────────────
+// NOTE: these must be declared BEFORE '/products/:id' so the literal paths
+// aren't swallowed by the ':id' param route.
+
+/**
+ * Trigger a full re-index of the store's products into the local DB.
+ * The app reads inventory from this index instead of the BC API.
+ * Stamps catalog_last_sync on the current user.
+ */
+router.post('/products/reindex', async (req, res) => {
+  try {
+    const summary = await productIndex.reindexStore(req.storeHash, req.accessToken);
+
+    // Record when this store's catalog was last synced (on the logged-in user).
+    // markCatalogSynced defaults to IST for the human-facing column.
+    const bcUserId = req.session?.user?.id ?? null;
+    await userStore.markCatalogSynced(req.storeHash, bcUserId);
+
+    res.json({
+      success: true,
+      synced: summary.synced,
+      pages: summary.pages,
+      lastSyncedAt: summary.at,
+      durationMs: summary.durationMs,
+    });
+  } catch (err) {
+    console.error('reindex error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Recommended products for the picker dropdown — shown when the merchant
+ * focuses the empty search box (before typing). Returns the most recently
+ * synced products from the local index, in the same shape as /products/search.
+ */
+router.get('/products/recommended', async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 8, 1), 20);
+    const rows = await productIndex.listRecent(req.storeHash, limit);
+    res.json(
+      rows.map((r) => ({
+        id: r.productId,
+        name: r.name,
+        sku: r.sku,
+        price: r.price,
+        availability: r.availability,
+        inventory_level: r.inventoryLevel,
+        inventory_tracking: r.inventoryTracking,
+        thumbnail: r.thumbnail,
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Index status for the UI: how many products are cached and when last synced.
+ */
+router.get('/products/index-status', async (req, res) => {
+  try {
+    const [count, lastSyncedAt] = await Promise.all([
+      productIndex.indexedCount(req.storeHash),
+      productIndex.lastSyncedAt(req.storeHash),
+    ]);
+    res.json({ count, lastSyncedAt });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/products/:id', async (req, res) => {
   try {
-    const bc = client(req);
-    const product = await bc.getProduct(Number(req.params.id));
+    // DB-first: read from the local index, fall back to a live BC fetch
+    // (and cache it) when the product isn't indexed yet.
+    const product = await productIndex.getProduct(
+      req.storeHash,
+      Number(req.params.id),
+      req.accessToken
+    );
+    if (!product) return res.status(404).json({ error: 'Product not found.' });
     res.json(product);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Store info (currency) ──────────────────────────────────────────────────────
+
+router.get('/store-info', async (req, res) => {
+  try {
+    const bc = client(req);
+    const info = await bc.getStoreInfo();
+    // storeHash lets the client build control-panel URLs (e.g. product edit).
+    res.json({ ...info, storeHash: req.storeHash });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -194,6 +328,89 @@ router.get('/categories/tree', async (req, res) => {
     const tree = await bc.getCategoryTree();
     res.json(tree);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Orders ───────────────────────────────────────────────────────────────────
+
+/**
+ * Write the bundle component breakdown into an order's staff_notes on demand.
+ * Useful for back-filling orders placed before the order webhook was registered,
+ * or for re-running it manually. The order webhook does this automatically for
+ * new orders. Idempotent.
+ */
+router.post('/orders/:id/annotate-bundles', async (req, res) => {
+  try {
+    const result = await bundleService.annotateOrderWithBundleContents(
+      req.storeHash,
+      req.accessToken,
+      Number(req.params.id)
+    );
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('annotateOrderWithBundleContents error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Deduct component inventory for an order's bundles on demand (back-fill / test).
+ * Idempotent — won't deduct twice for the same order. The order webhook does
+ * this automatically for new orders.
+ */
+router.post('/orders/:id/deduct-inventory', async (req, res) => {
+  try {
+    const result = await bundleService.deductOrderBundleInventory(
+      req.storeHash,
+      req.accessToken,
+      Number(req.params.id)
+    );
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('deductOrderBundleInventory error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Restore component inventory for an order on demand (back-fill / test). Only
+ * acts if the order is currently in a deducted state. The order-status webhook
+ * does this automatically on cancel/refund.
+ */
+router.post('/orders/:id/restore-inventory', async (req, res) => {
+  try {
+    const result = await bundleService.restoreOrderBundleInventory(
+      req.storeHash,
+      req.accessToken,
+      Number(req.params.id)
+    );
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('restoreOrderBundleInventory error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Toggle the "expand on order" flag for a bundle (the bundle list "Modify"
+ * action). When enabled, purchases of this bundle get their component products
+ * added to the order as $0 line items by the order webhook.
+ *
+ * PUT /api/bundles/:id/modify   body: { enabled: boolean }
+ * → { success, enabled }
+ */
+router.put('/bundles/:id/modify', async (req, res) => {
+  try {
+    const result = await bundleService.setBundleExpandFlag(
+      req.storeHash,
+      req.accessToken,
+      Number(req.params.id),
+      req.body.enabled !== false // default to enabling
+    );
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('setBundleExpandFlag error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -232,10 +449,18 @@ router.post('/webhooks/register', async (req, res) => {
  * the supported way to authenticate BC webhooks (BC does not HMAC-sign bodies).
  */
 async function registerBundleWebhooks(bcClient, storeHash) {
-  const destination = `${process.env.APP_URL}/webhooks/inventory`;
-  const scopes = [
-    'store/product/inventory/updated',
-    'store/product/updated',
+  const inventoryDestination = `${process.env.APP_URL}/webhooks/inventory`;
+  const orderDestination = `${process.env.APP_URL}/webhooks/order`;
+  const orderStatusDestination = `${process.env.APP_URL}/webhooks/order-status`;
+
+  // Each scope is paired with the endpoint that handles it.
+  const hooks = [
+    { scope: 'store/product/inventory/updated', destination: inventoryDestination },
+    { scope: 'store/product/updated', destination: inventoryDestination },
+    // store/order/created → staff_notes breakdown + deduct component inventory.
+    { scope: 'store/order/created', destination: orderDestination },
+    // store/order/statusUpdated → restore component inventory on cancel/refund.
+    { scope: 'store/order/statusUpdated', destination: orderStatusDestination },
   ];
 
   // Attach the shared secret as a custom header when one is configured.
@@ -250,7 +475,7 @@ async function registerBundleWebhooks(bcClient, storeHash) {
   const headers = secret ? { 'X-Bundle-Secret': secret } : undefined;
 
   const results = [];
-  for (const scope of scopes) {
+  for (const { scope, destination } of hooks) {
     try {
       const result = await bcClient.registerWebhook(scope, destination, headers);
       results.push(result);

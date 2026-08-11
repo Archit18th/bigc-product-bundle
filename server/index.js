@@ -73,7 +73,7 @@ app.use(
   '/storefront',
   cors({
     origin: '*',
-    methods: ['GET'],
+    methods: ['GET', 'POST', 'OPTIONS'],
   })
 );
 

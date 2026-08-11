@@ -1,0 +1,111 @@
+// Prisma schema for the BigCommerce Bundles app.
+//
+// Currently persists per-store OAuth tokens and the system category ID —
+// the same data the old better-sqlite3 `stores` table held. The exported
+// tokenStore interface is unchanged; only the storage engine moved to Prisma.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Store {
+  id               Int      @id @default(autoincrement())
+  storeHash        String   @unique @map("store_hash") @db.VarChar(50)
+  accessToken      String   @map("access_token") @db.Text
+  userJson         Json     @map("user_json")
+  systemCategoryId Int?     @map("system_category_id")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  @@map("stores")
+}
+
+
+
+model User {
+  id          Int      @id @default(autoincrement())
+  storeHash   String   @map("store_hash") @db.VarChar(50)
+  bcUserId    Int?     @map("bc_user_id")
+  email       String?  @db.VarChar(255)
+  accessToken String?  @map("access_token") @db.Text
+  locale      String?  @db.VarChar(20)
+
+  /// When this user's catalog was last synced (null = never synced).
+  catalogLastSync DateTime? @map("catalog_last_sync")
+
+  /// Login status: true (1) = currently logged in, false (0) = logged out.
+  userStatus  Boolean  @default(false) @map("user_status")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  @@unique([storeHash, bcUserId], name: "store_user")
+  @@index([storeHash])
+  @@map("users")
+}
+
+/// Local index (cache) of BigCommerce products. Filled by the re-index/sync
+/// job and read by the app instead of hitting the BC API on every request.
+/// One row per (storeHash, productId). Linked to a store by `storeHash`.
+model Product {
+  id                Int      @id @default(autoincrement())
+  storeHash         String   @map("store_hash") @db.VarChar(50)
+  productId         Int      @map("product_id")
+  name              String   @db.VarChar(255)
+  sku               String?  @db.VarChar(100)
+  price             Decimal  @default(0) @db.Decimal(12, 2)
+  inventoryLevel    Int      @default(0) @map("inventory_level")
+  inventoryTracking String?  @map("inventory_tracking") @db.VarChar(20)
+  availability      String?  @db.VarChar(20)
+  thumbnail         String?  @db.Text
+  lastSyncedAt      DateTime @default(now()) @map("last_synced_at")
+
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([storeHash, productId], name: "store_product")
+  @@index([storeHash])
+  @@map("products")
+}
+
+/// Local record of each bundle created through the app. The bundle itself lives
+/// in BigCommerce (product + metafields); this table mirrors it for fast lookup
+/// and history. Timestamps are stored in IST (Indian Standard Time).
+model Bundle {
+  id              Int      @id @default(autoincrement())
+  storeHash       String   @map("store_hash") @db.VarChar(50)
+  bundleProductId Int      @map("bundle_product_id")
+  name            String   @db.VarChar(255)
+  price           Decimal  @default(0) @db.Decimal(12, 2)
+  salePrice       Decimal  @default(0) @map("sale_price") @db.Decimal(12, 2)
+  discountPercent Int      @default(0) @map("discount_percent")
+  inventoryLevel  Int      @default(0) @map("inventory_level")
+  available       Boolean  @default(true)
+  components      Json
+  /// The bundle product's storefront SEO URL (custom_url), so storefront links
+  /// resolve without a live BC fetch. Null until backfilled / re-saved.
+  url             String?  @db.VarChar(500)
+
+  createdAt         DateTime @map("created_at")
+  updatedAt         DateTime @map("updated_at")
+  inventorySyncedAt DateTime @map("inventory_synced_at")
+
+  @@unique([storeHash, bundleProductId], name: "store_bundle")
+  @@index([storeHash])
+  @@map("bundles")
+}
+
+/// Per-store app settings / preferences (one row per store).
+/// Linked to a store by `storeHash` (plain column, no enforced FK).
+model StoreSettings {
+  id                     Int      @id @default(autoincrement())
+  storeHash              String   @unique @map("store_hash") @db.VarChar(50)
+  defaultDiscountPercent Int      @default(0) @map("default_discount_percent")
+  bundleWidgetEnabled    Boolean  @default(true) @map("bundle_widget_enabled")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  @@map("store_settings")
+}
