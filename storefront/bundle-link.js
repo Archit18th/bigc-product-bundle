@@ -1,0 +1,487 @@
+/**
+ * BC Bundle Link — Storefront Script
+ * =====================================================================
+ * Add this script via BigCommerce Control Panel → Storefront → Script Manager.
+ *
+ * CONFIGURATION (edit the two lines in the CONFIG block below):
+ *   APP_URL    — the URL where your Bundles App backend is hosted
+ *                e.g. 'https://bundles.myapp.com'
+ *   STORE_HASH — your BigCommerce store hash
+ *                e.g. 'abc123xyz'
+ *
+ * PLACEMENT:   Pages with Products (recommended)
+ * LOCATION:    Footer
+ * =====================================================================
+ *
+ * WHAT IT DOES:
+ * On any product page, this script checks whether the current product
+ * belongs to one or more bundles. If it does, it injects a "View bundles
+ * containing this product" link near the product price.
+ *
+ * Clicking the link can either:
+ *   A) Open a modal overlay listing all available bundles (DISPLAY_MODE = 'modal')
+ *   B) Redirect to a filtered category page            (DISPLAY_MODE = 'redirect')
+ *
+ * Set DISPLAY_MODE below to choose your preferred behaviour.
+ */
+
+(function () {
+  'use strict';
+
+  /* ================================================================
+   * ✏️  CONFIGURATION — edit these values before uploading
+   * ================================================================ */
+  var CONFIG = {
+    APP_URL: 'https://your-bundles-app.com',   // ← your app's base URL
+    STORE_HASH: 'YOUR_STORE_HASH',             // ← your BC store hash
+
+    // 'modal'    — show bundles in a slide-up panel (no page navigation)
+    // 'redirect' — navigate to a category/search page filtered to bundles
+    DISPLAY_MODE: 'modal',
+
+    // Only used when DISPLAY_MODE = 'redirect'
+    // Format: '/bundles/' or a search results URL pattern
+    // The product ID is appended as a query param: ?bundle_product=<id>
+    REDIRECT_URL: '/bundles/',
+
+    // Text shown on the link
+    LINK_TEXT: 'Available in {count} bundle{plural}',
+
+    // CSS class prefix (avoids conflicts with theme styles)
+    PREFIX: 'bcb',
+  };
+  /* ================================================================ */
+
+  // ── Guards ─────────────────────────────────────────────────────────
+
+  // BUG-18: warn loudly if the merchant hasn't edited the CONFIG block
+  if (
+    CONFIG.STORE_HASH === 'YOUR_STORE_HASH' ||
+    CONFIG.APP_URL === 'https://your-bundles-app.com' ||
+    CONFIG.APP_URL.includes('your-bundles-app')
+  ) {
+    console.warn(
+      '[BC Bundles] bundle-link.js is not configured. ' +
+      'Edit APP_URL and STORE_HASH at the top of the script before uploading to Script Manager.'
+    );
+    return;
+  }
+
+  // Only run on product pages
+  if (!window.BCData || !window.BCData.product_id) return;
+
+  var productId = window.BCData.product_id;
+
+  // ── Inject styles ──────────────────────────────────────────────────
+
+  var STYLES = '\n\
+  .bcb-trigger {\n\
+    display: inline-flex;\n\
+    align-items: center;\n\
+    gap: 6px;\n\
+    margin: 10px 0;\n\
+    padding: 6px 12px;\n\
+    background: #f0f5ff;\n\
+    border: 1px solid #4b6bfb;\n\
+    border-radius: 20px;\n\
+    color: #4b6bfb;\n\
+    font-size: 13px;\n\
+    font-weight: 600;\n\
+    cursor: pointer;\n\
+    text-decoration: none;\n\
+    transition: background 0.15s, transform 0.1s;\n\
+    font-family: inherit;\n\
+  }\n\
+  .bcb-trigger:hover {\n\
+    background: #e0ecff;\n\
+    transform: translateY(-1px);\n\
+  }\n\
+  .bcb-trigger svg { flex-shrink: 0; }\n\
+\n\
+  /* ── Modal overlay ── */\n\
+  .bcb-overlay {\n\
+    position: fixed;\n\
+    inset: 0;\n\
+    background: rgba(0,0,0,0.45);\n\
+    z-index: 99998;\n\
+    display: flex;\n\
+    align-items: flex-end;\n\
+    justify-content: center;\n\
+    animation: bcbFadeIn 0.2s ease;\n\
+  }\n\
+  @media (min-width: 640px) {\n\
+    .bcb-overlay { align-items: center; }\n\
+  }\n\
+  @keyframes bcbFadeIn { from { opacity: 0; } to { opacity: 1; } }\n\
+\n\
+  .bcb-panel {\n\
+    background: #fff;\n\
+    border-radius: 16px 16px 0 0;\n\
+    padding: 0;\n\
+    width: 100%;\n\
+    max-width: 520px;\n\
+    max-height: 80vh;\n\
+    overflow-y: auto;\n\
+    box-shadow: 0 -4px 40px rgba(0,0,0,0.15);\n\
+    animation: bcbSlideUp 0.25s ease;\n\
+  }\n\
+  @media (min-width: 640px) {\n\
+    .bcb-panel {\n\
+      border-radius: 16px;\n\
+      max-height: 85vh;\n\
+    }\n\
+  }\n\
+  @keyframes bcbSlideUp {\n\
+    from { transform: translateY(30px); opacity: 0; }\n\
+    to   { transform: translateY(0);    opacity: 1; }\n\
+  }\n\
+\n\
+  .bcb-panel-header {\n\
+    display: flex;\n\
+    align-items: center;\n\
+    justify-content: space-between;\n\
+    padding: 18px 20px 14px;\n\
+    border-bottom: 1px solid #f0f0f0;\n\
+    position: sticky;\n\
+    top: 0;\n\
+    background: #fff;\n\
+    z-index: 1;\n\
+    border-radius: 16px 16px 0 0;\n\
+  }\n\
+  .bcb-panel-title {\n\
+    font-size: 16px;\n\
+    font-weight: 700;\n\
+    color: #1a1a1a;\n\
+    margin: 0;\n\
+    font-family: inherit;\n\
+  }\n\
+  .bcb-panel-close {\n\
+    width: 32px;\n\
+    height: 32px;\n\
+    border-radius: 50%;\n\
+    border: none;\n\
+    background: #f4f5f6;\n\
+    cursor: pointer;\n\
+    display: flex;\n\
+    align-items: center;\n\
+    justify-content: center;\n\
+    font-size: 16px;\n\
+    color: #666;\n\
+    flex-shrink: 0;\n\
+  }\n\
+  .bcb-panel-close:hover { background: #e8e9eb; }\n\
+\n\
+  .bcb-bundle-list { padding: 12px 20px 20px; }\n\
+\n\
+  .bcb-bundle-card {\n\
+    display: flex;\n\
+    align-items: center;\n\
+    gap: 14px;\n\
+    padding: 14px;\n\
+    border: 1px solid #e8e9eb;\n\
+    border-radius: 10px;\n\
+    margin-bottom: 10px;\n\
+    text-decoration: none;\n\
+    color: inherit;\n\
+    transition: box-shadow 0.15s, border-color 0.15s;\n\
+    cursor: pointer;\n\
+  }\n\
+  .bcb-bundle-card:hover {\n\
+    border-color: #4b6bfb;\n\
+    box-shadow: 0 2px 12px rgba(75,107,251,0.12);\n\
+  }\n\
+  .bcb-bundle-thumb {\n\
+    width: 56px;\n\
+    height: 56px;\n\
+    object-fit: cover;\n\
+    border-radius: 8px;\n\
+    background: #f0f0f0;\n\
+    flex-shrink: 0;\n\
+  }\n\
+  .bcb-bundle-thumb-placeholder {\n\
+    width: 56px;\n\
+    height: 56px;\n\
+    border-radius: 8px;\n\
+    background: #e8e9eb;\n\
+    display: flex;\n\
+    align-items: center;\n\
+    justify-content: center;\n\
+    font-size: 22px;\n\
+    flex-shrink: 0;\n\
+  }\n\
+  .bcb-bundle-info { flex: 1; min-width: 0; }\n\
+  .bcb-bundle-name {\n\
+    font-size: 14px;\n\
+    font-weight: 600;\n\
+    color: #1a1a1a;\n\
+    margin: 0 0 4px;\n\
+    white-space: nowrap;\n\
+    overflow: hidden;\n\
+    text-overflow: ellipsis;\n\
+    font-family: inherit;\n\
+  }\n\
+  .bcb-bundle-price {\n\
+    font-size: 15px;\n\
+    font-weight: 700;\n\
+    color: #2b6bfb;\n\
+    font-family: inherit;\n\
+  }\n\
+  .bcb-bundle-arrow {\n\
+    color: #aaa;\n\
+    font-size: 18px;\n\
+    flex-shrink: 0;\n\
+  }\n\
+  .bcb-empty {\n\
+    text-align: center;\n\
+    padding: 30px 20px;\n\
+    color: #888;\n\
+    font-size: 14px;\n\
+    font-family: inherit;\n\
+  }\n\
+  .bcb-spinner {\n\
+    text-align: center;\n\
+    padding: 30px;\n\
+    color: #888;\n\
+    font-family: inherit;\n\
+  }\n\
+  ';
+
+  injectStyles(STYLES);
+
+  // ── Fetch bundles from app API ─────────────────────────────────────
+
+  var apiUrl =
+    CONFIG.APP_URL.replace(/\/$/, '') +
+    '/storefront/bundles/' +
+    CONFIG.STORE_HASH +
+    '/' +
+    productId;
+
+  fetchJSON(apiUrl, function (err, data) {
+    if (err || !data || !data.bundles || data.bundles.length === 0) return;
+
+    var bundles = data.bundles;
+    injectTrigger(bundles);
+  });
+
+  // ── Inject trigger link ────────────────────────────────────────────
+
+  function injectTrigger(bundles) {
+    var count = bundles.length;
+    var label = CONFIG.LINK_TEXT
+      .replace('{count}', count)
+      .replace('{plural}', count === 1 ? '' : 's');
+
+    var trigger = document.createElement('a');
+    trigger.className = 'bcb-trigger';
+    trigger.href = '#';
+    trigger.setAttribute('role', 'button');
+    trigger.setAttribute('aria-haspopup', 'dialog');
+    trigger.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>' +
+      '<span>' + escapeHtml(label) + '</span>';
+
+    trigger.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (CONFIG.DISPLAY_MODE === 'redirect') {
+        window.location.href =
+          CONFIG.REDIRECT_URL + '?bundle_product=' + productId;
+      } else {
+        openModal(bundles);
+      }
+    });
+
+    // Try to insert after price, before add-to-cart
+    var inserted = false;
+    var priceSelectors = [
+      '.productView-price',
+      '[data-product-price-with-tax]',
+      '[data-product-price-without-tax]',
+      '.price-section',
+      '.product-price',
+      '.pdp-price',
+    ];
+    for (var i = 0; i < priceSelectors.length; i++) {
+      var el = document.querySelector(priceSelectors[i]);
+      if (el) {
+        el.insertAdjacentElement('afterend', trigger);
+        inserted = true;
+        break;
+      }
+    }
+    if (!inserted) {
+      // Fallback: insert before add-to-cart button
+      var cartSelectors = [
+        '#form-action-addToCart',
+        '.add-to-cart-button',
+        '[data-button-type="add-cart"]',
+        '.productView-details',
+      ];
+      for (var j = 0; j < cartSelectors.length; j++) {
+        var cartEl = document.querySelector(cartSelectors[j]);
+        if (cartEl) {
+          cartEl.insertAdjacentElement('beforebegin', trigger);
+          inserted = true;
+          break;
+        }
+      }
+    }
+    if (!inserted) {
+      // Last resort
+      var main =
+        document.querySelector('.productView') ||
+        document.querySelector('main') ||
+        document.body;
+      main.prepend(trigger);
+    }
+  }
+
+  // ── Modal ──────────────────────────────────────────────────────────
+
+  function openModal(bundles) {
+    // Remove any existing modal
+    var existing = document.getElementById('bcb-modal-overlay');
+    if (existing) existing.remove();
+
+    var overlay = document.createElement('div');
+    overlay.className = 'bcb-overlay';
+    overlay.id = 'bcb-modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', 'Bundles containing this product');
+
+    overlay.innerHTML =
+      '<div class="bcb-panel" id="bcb-panel">' +
+        '<div class="bcb-panel-header">' +
+          '<p class="bcb-panel-title">Available Bundles</p>' +
+          '<button class="bcb-panel-close" id="bcb-close-btn" aria-label="Close">✕</button>' +
+        '</div>' +
+        '<div class="bcb-bundle-list">' +
+          buildBundleListHTML(bundles) +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    // Trap focus & close handlers
+    document.getElementById('bcb-close-btn').addEventListener('click', closeModal);
+
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) closeModal();
+    });
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.getElementById('bcb-close-btn').focus();
+  }
+
+  function closeModal() {
+    var overlay = document.getElementById('bcb-modal-overlay');
+    if (overlay) {
+      overlay.style.animation = 'none';
+      overlay.style.opacity = '0';
+      overlay.style.transition = 'opacity 0.15s';
+      setTimeout(function () { overlay.remove(); }, 150);
+    }
+    document.removeEventListener('keydown', handleKeyDown);
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Escape') closeModal();
+  }
+
+  function buildBundleListHTML(bundles) {
+    if (!bundles || bundles.length === 0) {
+      return '<div class="bcb-empty">No available bundles found for this product.</div>';
+    }
+
+    return bundles
+      .map(function (b) {
+        var thumb = b.thumbnail
+          ? '<img class="bcb-bundle-thumb" src="' + escapeHtml(b.thumbnail) + '" alt="' + escapeHtml(b.name) + '" loading="lazy">'
+          : '<div class="bcb-bundle-thumb-placeholder">📦</div>';
+
+        var price =
+          b.sale_price && Number(b.sale_price) < Number(b.price)
+            ? formatCurrency(b.sale_price)
+            : formatCurrency(b.calculated_price || b.price);
+
+        return (
+          '<a href="' + escapeHtml(b.url) + '" class="bcb-bundle-card">' +
+            thumb +
+            '<div class="bcb-bundle-info">' +
+              '<p class="bcb-bundle-name">' + escapeHtml(b.name) + '</p>' +
+              '<span class="bcb-bundle-price">' + price + '</span>' +
+            '</div>' +
+            '<span class="bcb-bundle-arrow">›</span>' +
+          '</a>'
+        );
+      })
+      .join('');
+  }
+
+  // ── Utilities ──────────────────────────────────────────────────────
+
+  function fetchJSON(url, callback) {
+    if (typeof window.fetch === 'function') {
+      window
+        .fetch(url)
+        .then(function (res) { return res.json(); })
+        .then(function (data) { callback(null, data); })
+        .catch(function (err) { callback(err, null); });
+    } else {
+      // XHR fallback for older browsers
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState === 4) {
+          if (xhr.status === 200) {
+            try {
+              callback(null, JSON.parse(xhr.responseText));
+            } catch (e) {
+              callback(e, null);
+            }
+          } else {
+            callback(new Error('HTTP ' + xhr.status), null);
+          }
+        }
+      };
+      xhr.send();
+    }
+  }
+
+  function injectStyles(css) {
+    var el = document.createElement('style');
+    el.textContent = css;
+    document.head.appendChild(el);
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;'); // BUG-21: escape single quotes for attribute safety
+  }
+
+  function formatCurrency(amount) {
+    var num = Number(amount);
+    if (isNaN(num)) return '';
+    // Use Intl.NumberFormat when available for locale-aware currency formatting
+    if (window.Intl && Intl.NumberFormat) {
+      try {
+        var currency =
+          (window.BCData && window.BCData.shop_currency) || 'USD';
+        return new Intl.NumberFormat(navigator.language || 'en', {
+          style: 'currency',
+          currency: currency,
+        }).format(num);
+      } catch (_) {
+        // fall through to simple fallback
+      }
+    }
+    return '$' + num.toFixed(2);
+  }
+
+})();
