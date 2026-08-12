@@ -50,7 +50,8 @@ export default function EditBundle() {
     ? {
         name: bundle.name,
         description: bundle.description || '',
-        price: bundle.price,
+        // Price is derived from components + discount; load the saved discount %.
+        discount_percent: bundle.bundle_config?.discount_percent || 0,
         // BUG-02: BC v3 returns categories as an array of integers, not objects.
         // The backend also strips the hidden system category before sending,
         // so this array is already clean and can be used directly.
@@ -60,11 +61,18 @@ export default function EditBundle() {
           qty: p.qty,
           name: p.name,
           sku: p.sku,
+          price: p.price, // live unit price for the subtotal calc
           thumbnail: p.thumbnail,
           // Live stock/availability enriched by the backend getBundle response,
           // so the picker shows current status instead of '—'.
           stock: p.stock,
           availability: p.availability,
+          // Reservation DISABLED: bundles no longer deduct component stock, so
+          // p.stock already reflects the true standalone inventory. There is
+          // nothing to "add back", so reserved is always 0 — otherwise the
+          // preview would double-count the bundle's inventory_level and inflate
+          // the buildable count (e.g. 10 stock would wrongly show 18 bundles).
+          reserved: 0,
         })),
       }
     : null;
@@ -122,6 +130,8 @@ export default function EditBundle() {
           onSubmit={handleSubmit}
           saving={saving}
           submitLabel="Save Changes"
+          isEdit
+          currentInventory={bundle.inventory_level}
         />
       )}
     </Box>

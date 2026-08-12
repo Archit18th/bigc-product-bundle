@@ -38,22 +38,25 @@ export default function CreateBundle() {
         ← Back to Bundles
       </Button>
 
-      <Text bold marginBottom="large" style={{ fontSize: 24 }}>Create Bundle</Text>
-
       {error && (
-        <Alert
-          type="error"
-          header="Failed to create bundle"
-          messages={[{ text: error }]}
-          marginBottom="medium"
-          onClose={() => setError(null)}
-        />
+        <Box style={{ maxWidth: 1180, margin: '0 auto' }}>
+          <Alert
+            type="error"
+            header="Failed to create bundle"
+            messages={[{ text: error }]}
+            marginBottom="medium"
+            onClose={() => setError(null)}
+          />
+        </Box>
       )}
 
       <BundleForm
         onSubmit={handleSubmit}
+        onCancel={() => navigate('/')}
         saving={saving}
-        submitLabel="Create Bundle"
+        submitLabel="Save Bundle"
+        title="Create Product Bundle"
+        subtitle="Combine multiple products into a bundle and offer customers a discounted price."
       />
     </Box>
   );

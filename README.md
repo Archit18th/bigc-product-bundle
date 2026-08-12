@@ -74,6 +74,7 @@ Each **component product** gets a metafield:
 4. Under **OAuth Scopes**, enable:
    - Products: **Modify**
    - Store Content: **Modify** (for webhook registration)
+   - Orders: **Modify** (to read order line items and write the bundle breakdown into staff notes)
    - Information & Settings: **Read-Only**
 
 5. Note down your **Client ID** and **Client Secret**
@@ -208,13 +209,25 @@ You can use your theme's JavaScript to read the `bundle_product` query parameter
 
 ## Webhook
 
-The app automatically registers two webhooks on first bundle creation:
+The app automatically registers four webhooks on first bundle creation:
 - `store/product/inventory/updated` — fires when a product's stock level changes
 - `store/product/updated` — fires when any product field changes, including availability (so manually disabling a component also disables its bundles)
+- `store/order/created` — fires when a new order is placed → writes the bundle breakdown into **staff notes** *and* **deducts component inventory** (see below)
+- `store/order/statusUpdated` — fires when an order's status changes → **restores component inventory** if the order is refunded/cancelled/declined
 
-Both point at the same endpoint and re-sync every bundle containing the changed product (recalculating availability and inventory level).
+The product webhooks point at `POST /webhooks/inventory`; the order webhook at `POST /webhooks/order`; the status webhook at `POST /webhooks/order-status`.
 
-Webhook endpoint: `POST https://your-app.com/webhooks/inventory`
+### Bundle order behaviour
+
+When an order containing a bundle is created:
+1. **Staff notes** — each bundle's component products + quantities are written into the order's `staff_notes` (visible on the admin order page). Written once and not rewritten when the bundle is later edited.
+2. **Component inventory** — each component is deducted by `component qty × quantity ordered`, then every affected bundle's buildable count is re-synced so it drops consistently in **both** the bundle list and the edit screen. The exact deductions are recorded in an `app_only` order metafield (`bc_bundles/inventory_adjusted`), which makes the operation idempotent (a re-delivered webhook is a no-op).
+
+When an order is **refunded, cancelled, or declined**, the recorded deductions are added back (exactly what was taken, even if the bundle was edited in between).
+
+> Only **product-tracked** components are adjusted; variant- and non-tracked components are skipped. Inventory work can be re-run / back-filled with `POST /api/orders/:id/deduct-inventory` and `POST /api/orders/:id/restore-inventory`; staff notes with `POST /api/orders/:id/annotate-bundles`.
+
+Webhook endpoints: `POST https://your-app.com/webhooks/{inventory,order,order-status}`
 
 Each webhook is registered with an `X-Bundle-Secret` custom header (value = `WEBHOOK_SECRET`). BigCommerce echoes this header back on every delivery, and the receiver verifies it in constant time — this is how callbacks are authenticated, since **BigCommerce does not HMAC-sign webhook bodies**.
 
@@ -237,6 +250,9 @@ All routes under `/api/*` require a valid session (set during OAuth load). The s
 | `DELETE` | `/api/bundles/:id` | Delete a bundle |
 | `GET` | `/api/products/search?q=` | Search products (for picker) |
 | `GET` | `/api/categories` | List categories |
+| `POST` | `/api/orders/:id/annotate-bundles` | Write the bundle breakdown into an order's staff notes (back-fill / manual re-run) |
+| `POST` | `/api/orders/:id/deduct-inventory` | Deduct component inventory for an order's bundles (idempotent) |
+| `POST` | `/api/orders/:id/restore-inventory` | Restore component inventory for a cancelled/refunded order |
 
 ### Public Storefront API
 
@@ -263,6 +279,8 @@ To change the link position, modify the `priceSelectors` and `cartSelectors` arr
 - [ ] App is running behind HTTPS
 - [ ] SQLite `DB_PATH` points at a persistent volume (or token store swapped for Redis/DB) for multi-instance or zero-downtime deploys
 - [ ] App URL and callback URLs match exactly in both `.env` and the BC Dev Portal
-- [ ] OAuth scopes include Products (Modify) and Store Content (Modify)
+- [ ] OAuth scopes include Products (Modify), Store Content (Modify), and Orders (Modify)
 - [ ] Storefront script configured with correct `APP_URL` and `STORE_HASH`
 - [ ] Webhook fires are tested by reducing a component product's stock to 0
+
+bundle 

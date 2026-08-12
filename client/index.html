@@ -6,11 +6,49 @@
     <title>Bundle Manager</title>
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
+      /* Size the document strictly to its content. Inside the BigCommerce admin
+         iframe a min-height/height:100% rule can otherwise inflate the body far
+         past the content, creating a large empty scrollable area. */
+      html, body, #root { height: auto; min-height: 0; }
       body { font-family: system-ui, -apple-system, sans-serif; background: #f5f6f8; }
     </style>
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      iframe-resizer (content window). BigCommerce's control panel hosts apps in
+      an iframe and uses iframe-resizer to size that iframe to the app's content.
+      Without this script the iframe stays at a large fixed height, leaving a big
+      empty scrollable area below the content (especially on shorter pages).
+      This script reports the real content height to the parent so the iframe
+      shrinks/grows to fit.
+
+      Force the 'bodyOffset' height-calculation method (overrides whatever the
+      BigCommerce host requests — readDataFromPage runs after readDataFromParent,
+      so the page wins). BigCommerce defaults to 'lowestElement', which scans
+      EVERY element's position. The category picker is a fixed-height scroll box,
+      and its clipped, scrolled-out rows still have real DOM positions thousands
+      of px down the page — 'lowestElement' measures those and inflates the
+      iframe, leaving a huge blank area below the content. 'bodyOffset' uses
+      document.body.offsetHeight, which correctly ignores the clipped overflow.
+    -->
+    <script>
+      // `heightCalculationMethod` here is only the child's DEFAULT — BigCommerce's
+      // parent overrides it with its own value at init, so this alone doesn't
+      // stick. After init, re-assert 'bodyOffset' via the child API (onReady runs
+      // AFTER the parent's init message) and force one recalculation. This is what
+      // makes the category picker's clipped scroll rows stop inflating the iframe.
+      window.iFrameResizer = {
+        heightCalculationMethod: 'bodyOffset',
+        onReady: function () {
+          if (window.parentIFrame) {
+            window.parentIFrame.setHeightCalculationMethod('bodyOffset');
+            window.parentIFrame.size();
+          }
+        },
+      };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/iframe-resizer@4.3.9/js/iframeResizer.contentWindow.min.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

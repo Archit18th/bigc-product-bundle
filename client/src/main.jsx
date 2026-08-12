@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { GlobalStyles, theme } from '@bigcommerce/big-design';
+import { GlobalStyles } from '@bigcommerce/big-design';
+import { theme } from '@bigcommerce/big-design-theme';
 import { ThemeProvider } from 'styled-components';
 import App from './App';
 

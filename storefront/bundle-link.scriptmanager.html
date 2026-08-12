@@ -1,3 +1,4 @@
+<script>
 /**
  * BC Bundle Link — Storefront Script
  * =====================================================================
@@ -71,11 +72,6 @@
   // BCData WITHOUT product_id and instead carry it only in the add-to-cart
   // form's hidden input or a data-entity-id attribute. Try each in turn so the
   // script works regardless of theme.
-  // Only run on a real product DETAIL page. Category/search/brand pages render
-  // product CARDS that also carry data-entity-id, so without this gate the
-  // script would resolve a card's ID and inject on listing pages too.
-  if (!isProductPage()) return;
-
   var productId = getProductId();
   if (!productId) return; // not a resolvable product page — nothing to do
 
@@ -104,42 +100,6 @@
     transform: translateY(-1px);\n\
   }\n\
   .bcb-trigger svg { flex-shrink: 0; }\n\
-\n\
-  /* ── "This bundle includes" list (on the bundle product page) ── */\n\
-  /* Neutral Cornerstone-style card: bordered box with a light header bar. */\n\
-  .bcb-contents {\n\
-    margin: 16px 0;\n\
-    padding: 0;\n\
-    background: #fff;\n\
-    border: 1px solid #e0e0e0;\n\
-    border-radius: 4px;\n\
-    overflow: hidden;\n\
-    font-family: inherit;\n\
-  }\n\
-  .bcb-contents-title {\n\
-    margin: 0;\n\
-    padding: 12px 16px;\n\
-    font-size: 13px;\n\
-    font-weight: 600;\n\
-    color: #333;\n\
-    text-transform: uppercase;\n\
-    letter-spacing: 0.5px;\n\
-    background: #fafafa;\n\
-    border-bottom: 1px solid #e0e0e0;\n\
-  }\n\
-  .bcb-contents-list { margin: 0; padding: 0 16px; list-style: none; }\n\
-  .bcb-contents-item {\n\
-    display: flex;\n\
-    align-items: baseline;\n\
-    gap: 8px;\n\
-    padding: 10px 0;\n\
-    font-size: 14px;\n\
-    color: #333;\n\
-    border-bottom: 1px solid #f0f0f0;\n\
-  }\n\
-  .bcb-contents-item:last-child { border-bottom: none; }\n\
-  .bcb-contents-qty { font-weight: 600; color: #888; flex-shrink: 0; min-width: 22px; }\n\
-  .bcb-contents-name { font-weight: 400; }\n\
 \n\
   /* ── Modal overlay ── */\n\
   .bcb-overlay {\n\
@@ -307,162 +267,6 @@
     injectTrigger(bundles);
   });
 
-  // ── Fetch this bundle's OWN contents (if it is a bundle product) ────
-  // Lists the component products on the bundle product's own page.
-  var contentsUrl =
-    CONFIG.APP_URL.replace(/\/$/, '') +
-    '/storefront/bundle-contents/' +
-    CONFIG.STORE_HASH +
-    '/' +
-    productId;
-
-  fetchJSON(contentsUrl, function (err, data) {
-    if (err || !data || !data.products || data.products.length === 0) return;
-    injectContents(data.products);
-    // This product IS a bundle — take over its Add to Cart so the components
-    // are added as their own ₹0 cart lines (via the app's server-side cart),
-    // instead of the native add which would only add the single bundle line.
-    interceptAddToCart();
-  });
-
-  // ── Bundle add-to-cart interception ─────────────────────────────────────────
-
-  function interceptAddToCart() {
-    var btn = findAddToCartButton();
-    if (!btn) return;
-    // Capture-phase listener so we beat the theme's own handler and can stop it.
-    btn.addEventListener('click', onAddToCart, true);
-    // Also guard the surrounding form submit (Enter key / theme form handlers).
-    var form = btn.form || (btn.closest && btn.closest('form'));
-    if (form) form.addEventListener('submit', onAddToCart, true);
-  }
-
-  function findAddToCartButton() {
-    var selectors = [
-      '#form-action-addToCart',
-      '.add-to-cart-button',
-      '[data-button-type="add-cart"]',
-      '[data-wait-message]',
-    ];
-    for (var i = 0; i < selectors.length; i++) {
-      var el = document.querySelector(selectors[i]);
-      if (el) return el;
-    }
-    return null;
-  }
-
-  function onAddToCart(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-
-    var qty = readQuantity();
-    var channelId =
-      (window.BCData && window.BCData.channel_id) || undefined;
-
-    // Read the shopper's existing cart id (same-origin storefront API) so we add
-    // to it rather than wiping it with a brand-new cart. Null if no cart yet.
-    getCurrentCartId(function (cartId) {
-      var payload = {
-        bundleProductId: productId,
-        quantity: qty,
-        cartId: cartId || undefined,
-        channelId: channelId,
-      };
-      postJSON(
-        CONFIG.APP_URL.replace(/\/$/, '') + '/storefront/cart/add-bundle/' + CONFIG.STORE_HASH,
-        payload,
-        function (err, res) {
-          if (err || !res || res.error) {
-            // Never silently break add-to-cart — fall back to the native flow.
-            return submitNative();
-          }
-          // New cart → adopt it via its storefront URL. Existing cart → refresh.
-          if (!cartId && res.cartUrl) {
-            window.location.href = res.cartUrl;
-          } else {
-            window.location.href = '/cart.php';
-          }
-        }
-      );
-    });
-  }
-
-  function readQuantity() {
-    var input =
-      document.querySelector('[name="qty[]"]') ||
-      document.querySelector('input.form-input--incrementTotal') ||
-      document.querySelector('input[name="qty"]');
-    var n = input ? parseInt(input.value, 10) : 1;
-    return n && n > 0 ? n : 1;
-  }
-
-  function getCurrentCartId(cb) {
-    if (typeof window.fetch !== 'function') return cb(null);
-    window
-      .fetch('/api/storefront/carts', { credentials: 'include' })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (carts) {
-        var cart = Array.isArray(carts) ? carts[0] : null;
-        cb(cart && cart.id ? cart.id : null);
-      })
-      .catch(function () { cb(null); });
-  }
-
-  function submitNative() {
-    var btn = findAddToCartButton();
-    var form = btn && (btn.form || (btn.closest && btn.closest('form')));
-    if (form && typeof form.submit === 'function') {
-      form.submit();
-    } else if (btn) {
-      // Re-dispatch a click without our interceptor (it only blocks via the
-      // capture listener above, which we can't easily detach here, so reload).
-      window.location.reload();
-    }
-  }
-
-  // ── Inject "This bundle includes" list ──────────────────────────────
-
-  function injectContents(products) {
-    if (document.querySelector('.bcb-contents')) return; // avoid duplicates
-
-    var items = products
-      .map(function (p) {
-        var qty = p.qty && p.qty > 0 ? p.qty : 1;
-        return (
-          '<li class="bcb-contents-item">' +
-            '<span class="bcb-contents-qty">' + qty + ' &times;</span> ' +
-            '<span class="bcb-contents-name">' + escapeHtml(p.name) + '</span>' +
-          '</li>'
-        );
-      })
-      .join('');
-
-    var box = document.createElement('div');
-    box.className = 'bcb-contents';
-    box.innerHTML =
-      '<p class="bcb-contents-title">This bundle includes:</p>' +
-      '<ul class="bcb-contents-list">' + items + '</ul>';
-
-    // Insert after the price (same anchor logic as the trigger), else fall back.
-    var anchor = null;
-    var sel = [
-      '.productView-price', '[data-product-price-with-tax]',
-      '[data-product-price-without-tax]', '.price-section',
-      '.product-price', '.pdp-price',
-    ];
-    for (var i = 0; i < sel.length; i++) {
-      anchor = document.querySelector(sel[i]);
-      if (anchor) { anchor.insertAdjacentElement('afterend', box); return; }
-    }
-    var main =
-      document.querySelector('.productView-details') ||
-      document.querySelector('.productView') ||
-      document.querySelector('main') ||
-      document.body;
-    main.insertBefore(box, main.firstChild);
-  }
-
   // ── Inject trigger link ────────────────────────────────────────────
 
   function injectTrigger(bundles) {
@@ -620,17 +424,6 @@
 
   // ── Utilities ──────────────────────────────────────────────────────
 
-  // True only on a product DETAIL page (PDP), false on category/search/brand
-  // listing pages. Those listings render product cards (with data-entity-id),
-  // so we require a signal unique to a single-product page.
-  function isProductPage() {
-    // BCData.product_attributes is set only on PDPs (true on this store's theme).
-    if (window.BCData && window.BCData.product_attributes) return true;
-    // Standard Stencil product-detail container.
-    if (document.querySelector('.productView')) return true;
-    return false;
-  }
-
   // Find the current product's ID across theme variations. Returns a string/
   // number, or null if this isn't a resolvable product page.
   function getProductId() {
@@ -646,14 +439,9 @@
   }
 
   function fetchJSON(url, callback) {
-    // The 'ngrok-skip-browser-warning' header bypasses ngrok's free-tier browser
-    // interstitial (which otherwise returns an HTML warning page instead of our
-    // JSON). Harmless on non-ngrok hosts. Required while the app is tunnelled
-    // through *.ngrok-free.dev.
-    var NGROK_HEADER = { 'ngrok-skip-browser-warning': 'true' };
     if (typeof window.fetch === 'function') {
       window
-        .fetch(url, { headers: NGROK_HEADER })
+        .fetch(url)
         .then(function (res) { return res.json(); })
         .then(function (data) { callback(null, data); })
         .catch(function (err) { callback(err, null); });
@@ -661,7 +449,6 @@
       // XHR fallback for older browsers
       var xhr = new XMLHttpRequest();
       xhr.open('GET', url, true);
-      xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
       xhr.onreadystatechange = function () {
         if (xhr.readyState === 4) {
           if (xhr.status === 200) {
@@ -676,38 +463,6 @@
         }
       };
       xhr.send();
-    }
-  }
-
-  // POST JSON to the app (used to build the bundle cart). Sends the same
-  // ngrok-skip header as fetchJSON so the response isn't the ngrok interstitial.
-  function postJSON(url, body, callback) {
-    var headers = {
-      'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
-    };
-    if (typeof window.fetch === 'function') {
-      window
-        .fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(body) })
-        .then(function (res) { return res.json(); })
-        .then(function (data) { callback(null, data); })
-        .catch(function (err) { callback(err, null); });
-    } else {
-      var xhr = new XMLHttpRequest();
-      xhr.open('POST', url, true);
-      xhr.setRequestHeader('Content-Type', 'application/json');
-      xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
-      xhr.onreadystatechange = function () {
-        if (xhr.readyState === 4) {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            try { callback(null, JSON.parse(xhr.responseText)); }
-            catch (e) { callback(e, null); }
-          } else {
-            callback(new Error('HTTP ' + xhr.status), null);
-          }
-        }
-      };
-      xhr.send(JSON.stringify(body));
     }
   }
 
@@ -727,32 +482,14 @@
       .replace(/'/g, '&#39;'); // BUG-21: escape single quotes for attribute safety
   }
 
-  var _bcbCurrencySymbol = null;
-
-  // Resolve the storefront's currency SYMBOL. BCData.shop_currency is often unset
-  // (it defaulted us to USD → "US$551.25" on an INR store), so prefer sniffing the
-  // leading symbol off a real price already rendered on the page (e.g. "₹309.00").
-  function currencySymbol() {
-    if (_bcbCurrencySymbol !== null) return _bcbCurrencySymbol;
-    var m = /([^\d\s.,])\s?[\d,]+\.\d{2}/.exec(
-      document.body ? document.body.textContent || '' : ''
-    );
-    _bcbCurrencySymbol = (m && m[1]) || '';
-    return _bcbCurrencySymbol;
-  }
-
   function formatCurrency(amount) {
     var num = Number(amount);
     if (isNaN(num)) return '';
-    // Match what the storefront actually shows by using its own currency symbol.
-    var sym = currencySymbol();
-    if (sym) return sym + num.toFixed(2);
-    // Fallback: locale-aware formatting via the shop currency code, if known.
+    // Use Intl.NumberFormat when available for locale-aware currency formatting
     if (window.Intl && Intl.NumberFormat) {
       try {
         var currency =
-          (window.BCData && (window.BCData.currency_code || window.BCData.shop_currency)) ||
-          'USD';
+          (window.BCData && window.BCData.shop_currency) || 'USD';
         return new Intl.NumberFormat(navigator.language || 'en', {
           style: 'currency',
           currency: currency,
@@ -761,7 +498,8 @@
         // fall through to simple fallback
       }
     }
-    return num.toFixed(2);
+    return '$' + num.toFixed(2);
   }
 
 })();
+</script>
