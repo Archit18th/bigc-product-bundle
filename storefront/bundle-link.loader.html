@@ -5,7 +5,7 @@
    free-tier interstitial doesn't return an HTML page instead of the JS).
    Update the URL below if your ngrok/host URL changes. */
 (function () {
-  var SRC = 'https://relativistic-opprobrious-cataleya.ngrok-free.dev/storefront/bundle-link.js';
+  var SRC = 'https://bigc-product-bundle.onrender.com/storefront/bundle-link.js';
   fetch(SRC, { headers: { 'ngrok-skip-browser-warning': 'true' } })
     .then(function (r) { return r.text(); })
     .then(function (code) {
