@@ -32,8 +32,8 @@
    * ✏️  CONFIGURATION — edit these values before uploading
    * ================================================================ */
   var CONFIG = {
-    APP_URL: 'https://bigc-product-bundle.onrender.com',   // ← your app's base URL
-    STORE_HASH: 'vtc0o6t1vd',                   // ← your BC store hash
+    APP_URL: 'https://demolocations-bc-bundle-prod.com',   // ← your app's base URL
+    STORE_HASH: window.BC_BUNDLES_STORE_HASH,                   // ← your BC store hash
 
      
     DISPLAY_MODE: 'modal',
