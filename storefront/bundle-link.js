@@ -31,41 +31,57 @@
   /* ================================================================
    * ✏️  CONFIGURATION — edit these values before uploading
    * ================================================================ */
-  var CONFIG = {
-    APP_URL: 'https://demolocations-bc-bundle-prod.com',   // ← your app's base URL
-    STORE_HASH: window.BC_BUNDLES_STORE_HASH,                   // ← your BC store hash
+  // var CONFIG = {
+  //   APP_URL: 'https://demolocations-bc-bundle-prod.com',   // ← your app's base URL
+  //   STORE_HASH: window.BC_BUNDLES_STORE_HASH,                   // ← your BC store hash
 
      
-    DISPLAY_MODE: 'modal',
+  //   DISPLAY_MODE: 'modal',
 
-    // Only used when DISPLAY_MODE = 'redirect'
-    // Format: '/bundles/' or a search results URL pattern
-    // The product ID is appended as a query param: ?bundle_product=<id>
-    REDIRECT_URL: '/bundles/',
+  //   // Only used when DISPLAY_MODE = 'redirect'
+  //   // Format: '/bundles/' or a search results URL pattern
+  //   // The product ID is appended as a query param: ?bundle_product=<id>
+  //   REDIRECT_URL: '/bundles/',
 
-    // Text shown on the link
-    LINK_TEXT: 'Available in {count} bundle{plural}',
+  //   // Text shown on the link
+  //   LINK_TEXT: 'Available in {count} bundle{plural}',
 
-    // CSS class prefix (avoids conflicts with theme styles)
-    PREFIX: 'bcb',
-  };
-  /* ================================================================ */
+  //   // CSS class prefix (avoids conflicts with theme styles)
+  //   PREFIX: 'bcb',
+  // };
+  // /* ================================================================ */
 
-  // ── Guards ─────────────────────────────────────────────────────────
+  // // ── Guards ─────────────────────────────────────────────────────────
 
-  // BUG-18: warn loudly if the merchant hasn't edited the CONFIG block
-  if (
-    CONFIG.STORE_HASH === 'YOUR_STORE_HASH' ||
-    CONFIG.APP_URL === 'https://your-bundles-app.com' ||
-    CONFIG.APP_URL.includes('your-bundles-app')
-  ) {
-    console.warn(
-      '[BC Bundles] bundle-link.js is not configured. ' +
-      'Edit APP_URL and STORE_HASH at the top of the script before uploading to Script Manager.'
-    );
-    return;
-  }
+  // // BUG-18: warn loudly if the merchant hasn't edited the CONFIG block
+  // if (
+  //   CONFIG.STORE_HASH === 'YOUR_STORE_HASH' ||
+  //   CONFIG.APP_URL === 'https://your-bundles-app.com' ||
+  //   CONFIG.APP_URL.includes('your-bundles-app')
+  // ) {
+  //   console.warn(
+  //     '[BC Bundles] bundle-link.js is not configured. ' +
+  //     'Edit APP_URL and STORE_HASH at the top of the script before uploading to Script Manager.'
+  //   );
+  //   return;
+  // }
+var CONFIG = {
+  APP_URL: 'https://demolocations-bc-bundle-prod.com',
+  STORE_HASH: window.BC_BUNDLES_STORE_HASH,
+  DISPLAY_MODE: 'modal',
+  REDIRECT_URL: '/bundles/',
 
+  LINK_TEXT: 'Available in {count} bundle{plural}',
+  PREFIX: 'bcb'
+};
+
+
+if (!CONFIG.APP_URL || !CONFIG.STORE_HASH) {
+  console.warn(
+    '[BC Bundles] Configuration is missing. ' + 'Please check APP_URL and STORE_HASH before the script runs.'
+  );
+  return;
+}
   // Resolve the current product's ID. Themes vary: the Stencil default exposes
   // window.BCData.product_id, but some themes (e.g. this store's) populate
   // BCData WITHOUT product_id and instead carry it only in the add-to-cart

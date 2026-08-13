@@ -35,7 +35,7 @@ const STOREFRONT_SCRIPTS = [
 ];
 
 /** Build the inline loader HTML for one storefront script file. */
-function loaderHtml(appUrl, file) {
+function loaderHtml(appUrl, file, storeHash) {
   const src = appUrl.replace(/\/$/, '') + '/storefront/' + file;
   return (
     '<script>\n' +
@@ -43,6 +43,7 @@ function loaderHtml(appUrl, file) {
     '   real script WITH the ngrok-skip-browser-warning header so ngrok\'s free-tier\n' +
     '   interstitial does not return HTML instead of the JS. */\n' +
     '(function () {\n' +
+    '  window.BC_BUNDLES_STORE_HASH = ' + JSON.stringify(storeHash) + ';\n' +
     '  var SRC = ' + JSON.stringify(src) + ';\n' +
     '  fetch(SRC, { headers: { \'ngrok-skip-browser-warning\': \'true\' } })\n' +
     '    .then(function (r) { return r.text(); })\n' +
@@ -58,11 +59,11 @@ function loaderHtml(appUrl, file) {
 }
 
 /** The Scripts API payload for one script definition. */
-function scriptPayload(appUrl, def) {
+function scriptPayload(appUrl, def, storeHash) {
   return {
     name: def.name,
     description: 'Auto-installed by the BC Bundles app.',
-    html: loaderHtml(appUrl, def.file),
+    html: loaderHtml(appUrl, def.file, storeHash),
     // BC removes auto_uninstall scripts automatically when the app is uninstalled.
     auto_uninstall: true,
     load_method: 'default',
@@ -94,7 +95,7 @@ async function installStorefrontScripts(storeHash, accessToken, appUrl) {
 
   const results = [];
   for (const def of STOREFRONT_SCRIPTS) {
-    const body = scriptPayload(appUrl, def);
+    const body = scriptPayload(appUrl, def, storeHash);
     const uuid = uuidByName.get(def.name);
     try {
       if (uuid) {

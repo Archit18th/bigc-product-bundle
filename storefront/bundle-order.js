@@ -25,17 +25,27 @@
   /* ================================================================
    * ✏️  CONFIGURATION — edit these values before uploading
    * ================================================================ */
-  var CONFIG = {
-    APP_URL: 'https://demolocations-bc-bundle-prod.com', // ← your app's base URL
-    STORE_HASH: window.BC_BUNDLES_STORE_HASH,                                            // ← your BC store hash
-  };
-  /* ================================================================ */
+  // var CONFIG = {
+  //   APP_URL: 'https://demolocations-bc-bundle-prod.com', // ← your app's base URL
+  //   STORE_HASH: window.BC_BUNDLES_STORE_HASH,                                            // ← your BC store hash
+  // };
+  // /* ================================================================ */
 
-  if (CONFIG.APP_URL.indexOf('your-bundles-app') !== -1 || CONFIG.STORE_HASH === 'YOUR_STORE_HASH') {
-    console.warn('[BC Bundles] bundle-order.js is not configured — set APP_URL and STORE_HASH.');
-    return;
-  }
+  // if (CONFIG.APP_URL.indexOf('your-bundles-app') !== -1 || CONFIG.STORE_HASH === 'YOUR_STORE_HASH') {
+  //   console.warn('[BC Bundles] bundle-order.js is not configured — set APP_URL and STORE_HASH.');
+  //   return;
+  // }
+var CONFIG = {
+  APP_URL: 'https://demolocations-bc-bundle-prod.com',
+  STORE_HASH: window.BC_BUNDLES_STORE_HASH
+};
 
+if (!CONFIG.APP_URL || !CONFIG.STORE_HASH) {
+  console.warn(
+    '[BC Bundles] Configuration is missing. ' + 'Please check APP_URL and STORE_HASH before the script runs.'
+  );
+  return;
+}
   // Never run on the cart page — that surface is handled by bundle-cart.js,
   // which nests each bundle's components under its cart line. Without this guard
   // the order script's fallback placement drops an "includes" box at the top of

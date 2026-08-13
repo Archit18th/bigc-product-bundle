@@ -25,25 +25,32 @@
   /* ================================================================
    * ✏️  CONFIGURATION — edit these values before uploading
    * ================================================================ */
-  var CONFIG = {
-    APP_URL: 'https://demolocations-bc-bundle-prod.com', // ← your app's base URL
-    STORE_HASH: window.BC_BUNDLES_STORE_HASH,                                            // ← your BC store hash
-  };
-  /* ================================================================ */
+  // var CONFIG = {
+  //   APP_URL: 'https://demolocations-bc-bundle-prod.com', // ← your app's base URL
+  //   STORE_HASH: window.BC_BUNDLES_STORE_HASH,                                            // ← your BC store hash
+  // };
+  // /* ================================================================ */
 
-  if (CONFIG.APP_URL.indexOf('your-bundles-app') !== -1 || CONFIG.STORE_HASH === 'YOUR_STORE_HASH') {
-    console.warn('[BC Bundles] bundle-cart.js is not configured — set APP_URL and STORE_HASH.');
-    return;
-  }
+  // if (CONFIG.APP_URL.indexOf('your-bundles-app') !== -1 || CONFIG.STORE_HASH === 'YOUR_STORE_HASH') {
+  //   console.warn('[BC Bundles] bundle-cart.js is not configured — set APP_URL and STORE_HASH.');
+  //   return;
+  // }
+var CONFIG = {
+  APP_URL: 'https://demolocations-bc-bundle-prod.com',
+  STORE_HASH: window.BC_BUNDLES_STORE_HASH
+};
+
+if (!CONFIG.APP_URL || !CONFIG.STORE_HASH) {
+  console.warn('BC Bundles Configuration is missing. Bundle script will not run.');
+  return;
+}
 
   // Only run on the cart page.
   if (!isCartPage()) return;
 
-  var contentsCache = {}; // productId -> products[] (null while in-flight / not a bundle)
+  var contentsCache = {}; 
   var currencySymbol = null;
 
-  // The cart re-renders itself (qty changes, item removal) via AJAX, which wipes
-  // our injected rows. Re-run on load and whenever the cart DOM mutates.
   start();
 
   function start() {
