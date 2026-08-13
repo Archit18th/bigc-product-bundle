@@ -36,7 +36,7 @@
   //   return;
   // }
 var CONFIG = {
-  APP_URL: 'https://demolocations-bc-bundle-prod.com',
+  APP_URL: 'https://bigc-product-bundle.onrender.com',
   STORE_HASH: window.BC_BUNDLES_STORE_HASH
 };
 
