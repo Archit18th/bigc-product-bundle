@@ -7,16 +7,17 @@
  *   APP_URL    — the URL where your Bundles App backend is hosted
  *   STORE_HASH — your BigCommerce store hash
  *
- * PLACEMENT:   All pages (the script self-gates to the cart page)
+ * PLACEMENT:   All pages (the script self-gates to the cart + checkout pages)
  * LOCATION:    Footer
  * =====================================================================
  *
  * WHAT IT DOES:
- * On the Cart page, for every bundle line item it injects a nested block
- * directly UNDER the bundle's row, listing each component product the bundle
- * contains — image, name, price (always 0), quantity, and total (0). This
- * replaces the raw ₹0 custom-item lines / the separate "includes" box with a
- * clean, grouped breakdown that reads as part of the bundle line.
+ * On the Cart page and the multi-step Checkout page, for every bundle line
+ * item it injects a nested block directly UNDER the bundle's row, listing
+ * each component product the bundle contains — image, name, price (always
+ * 0), quantity, and total (0). This replaces the raw ₹0 custom-item lines /
+ * the separate "includes" box with a clean, grouped breakdown that reads as
+ * part of the bundle line.
  */
 
 (function () {
@@ -99,6 +100,7 @@ if (!CONFIG.APP_URL || !CONFIG.STORE_HASH) {
 
     if (/\/cart\.php/i.test(path)) return true;
     if (/(^|\W)cart(\W|$)/i.test(path)) return true;
+    if (/^\/checkout\/?$/i.test(path)) return true;
     return !!document.querySelector('.cart, [class*="cartContent"], .previewCartContainer, [data-cart]');
   }
 

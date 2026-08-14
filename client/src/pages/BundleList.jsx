@@ -245,6 +245,9 @@ export default function BundleList() {
   const [deleting, setDeleting] = useState(false);
   const [quickView, setQuickView] = useState(null);
 
+  const [bulkDeleteModal, setBulkDeleteModal] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
   // "Modify" popup: toggles whether a bundle expands into $0 product lines on
   // orders when purchased. { id, name, enabled } — enabled = current flag state.
   const [modifyModal, setModifyModal] = useState(null);
@@ -252,8 +255,8 @@ export default function BundleList() {
   const [modifyError, setModifyError] = useState(null);
 
   const [reindexing, setReindexing] = useState(false);
-  const [actionMsg, setActionMsg] = useState(null); // success banner
-  const [selectedItems, setSelectedItems] = useState([]); // row selection
+  const [actionMsg, setActionMsg] = useState(null); 
+  const [selectedItems, setSelectedItems] = useState([]); 
 
   // List controls
   const [activeTab, setActiveTab] = useState('all');
@@ -336,6 +339,27 @@ export default function BundleList() {
       setError(`Failed to delete: ${err.message}`);
     } finally {
       setDeleting(false);
+    }
+  };
+
+
+  const handleBulkDelete = async () => {
+    const targets = selectedItems;
+    if (!targets.length) return;
+    setBulkDeleting(true);
+    try {
+      const results = await Promise.allSettled(targets.map((b) => deleteBundle(b.id)));
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      setBulkDeleteModal(false);
+      setSelectedItems([]);
+      await fetchBundles();
+      if (failed) {
+        setError(`Failed to delete ${failed} of ${targets.length} bundle${targets.length !== 1 ? 's' : ''}.`);
+      } else {
+        setActionMsg(`Deleted ${targets.length} bundle${targets.length !== 1 ? 's' : ''}.`);
+      }
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -781,6 +805,18 @@ export default function BundleList() {
                 itemName="bundles"
                 emptyComponent={emptyComponent}
                 selectable={{ selectedItems, onSelectionChange: setSelectedItems }}
+                actions={
+                  selectedItems.length > 0 ? (
+                    <Button
+                      variant="subtle"
+                      actionType="destructive"
+                      iconLeft={<DeleteIcon />}
+                      onClick={() => setBulkDeleteModal(true)}
+                    >
+                      Delete {selectedItems.length} selected
+                    </Button>
+                  ) : undefined
+                }
                 sortable={{
                   columnHash: sort.columnHash,
                   direction: sort.direction,
@@ -833,6 +869,29 @@ export default function BundleList() {
           Are you sure you want to delete <strong>{deleteModal?.name}</strong>? This will
           remove the bundle product and unlink it from all component products. This action
           cannot be undone.
+        </Text>
+      </Modal>
+
+      {/* Bulk delete confirmation modal */}
+      <Modal
+        isOpen={bulkDeleteModal}
+        onClose={() => { if (!bulkDeleting) setBulkDeleteModal(false); }}
+        header="Delete Bundles"
+        actions={[
+          { text: 'Cancel', variant: 'subtle', onClick: () => setBulkDeleteModal(false), disabled: bulkDeleting },
+          {
+            text: bulkDeleting ? 'Deleting…' : 'Delete',
+            variant: 'primary',
+            actionType: 'destructive',
+            onClick: handleBulkDelete,
+            disabled: bulkDeleting,
+          },
+        ]}
+      >
+        <Text>
+          Are you sure you want to delete <strong>{selectedItems.length}</strong> bundle
+          {selectedItems.length !== 1 ? 's' : ''}? This will remove each bundle product and
+          unlink it from its component products. This action cannot be undone.
         </Text>
       </Modal>
 
