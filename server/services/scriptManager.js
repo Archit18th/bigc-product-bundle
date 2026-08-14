@@ -30,7 +30,7 @@ const { BigCommerceClient } = require('./bigcommerce');
 // Content. Names must be plain — BC rejects punctuation like em-dashes.
 const STOREFRONT_SCRIPTS = [
   { name: 'BC Bundles Link', file: 'bundle-link.js', visibility: 'storefront' },
-  { name: 'BC Bundles Cart', file: 'bundle-cart.js', visibility: 'storefront' },
+  { name: 'BC Bundles Cart', file: 'bundle-cart.js', visibility: 'all_pages' },
   { name: 'BC Bundles Order', file: 'bundle-order.js', visibility: 'order_confirmation' },
 ];
 
