@@ -56,14 +56,14 @@ if (!CONFIG.APP_URL || !CONFIG.STORE_HASH) {
 
   function start() {
     run();
-    var root = findCartRoot() || document.body;
+   
     var pending = false;
     var observer = new MutationObserver(function () {
       if (pending) return;
       pending = true;
       setTimeout(function () { pending = false; run(); }, 150);
     });
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   function run() {
